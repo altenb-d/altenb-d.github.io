@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <title>Project 1 — CS 180</title>
+  <link rel="stylesheet" href="../style.css">
+  <meta charset="utf-8">
+</head>
+<body>
+<header>
+  <p class="eyebrow">Project 01</p>
+  <h1>Colorizing the Prokudin-Gorskii Photo Collection</h1>
+</header>
+
+<h2>Overview</h2>
+<p>
+  Sergei Prokudin-Gorskii photographed the Russian Empire in three exposures
+  per scene, one through a blue filter, one through green and one through red,
+  all recorded onto a single glass plate. The digitized plates are stacked
+  vertically in that order. To recover a color photograph the plate has to be
+  cut into three channels and the channels have to be shifted back on top of
+  each other, since the three exposures were never perfectly registered.
+</p>
+<p>
+  This page walks through a single-scale search first, then the pyramid that
+  makes the same idea work on the full-resolution scans, and finally an
+  extension that aligns on image gradients instead of raw pixel values.
+</p>
+
+<h2>Part 1: Single-scale alignment</h2>
+<h3>Approach</h3>
+<p>
+  The plate is divided into three equal strips by integer division of its
+  height. Any leftover rows at the bottom are discarded so that all three
+  channels have exactly the same shape. Green and red are then each aligned
+  against blue.
+</p>
+<p>
+  The search itself is exhaustive. For every displacement in a window of
+  [-15, 15] pixels in both directions the moving channel is shifted with
+  <code>np.roll</code>, scored against the reference, and the best-scoring
+  displacement is kept. Because <code>np.roll</code> wraps around, the strip
+  that re-enters on the opposite side is meaningless; both images are
+  therefore cropped by 10% per side before scoring, which also removes the
+  bright plate borders. Those borders sit in the same place in all three
+  channels, so leaving them in would let the search optimize for aligning the
+  borders rather than the photograph. Ten percent per side is enough to clear
+  the borders on every plate in the set. A larger crop of 20% was tried and did
+  not improve any of the results.
+</p>
+
+<h3>Metrics</h3>
+<p>
+  <strong>L2</strong> (Euclidean distance) treats each image as a long vector
+  and measures the straight-line distance between them: the difference is
+  squared, summed over all pixels, and square-rooted. It is cheap, but it
+  assumes the two channels have comparable brightness, because a constant
+  offset between them adds to the distance at every single pixel.
+</p>
+<p>
+  <strong>NCC</strong> (normalized cross-correlation) removes that assumption.
+  Both images are mean-subtracted and divided by their norm, and the dot
+  product of the two resulting unit vectors is taken. Subtracting the mean
+  makes the score indifferent to a brightness offset and dividing by the norm
+  makes it indifferent to a contrast factor, so NCC responds to the
+  <em>pattern</em> in the image rather than to absolute intensities. A perfect
+  match scores 1.
+</p>
+<p>
+  Both are implemented so that a higher value means a better match. The L2
+  result is negated, which lets the search routine simply take the maximum
+  regardless of which metric it was handed.
+</p>
+
+<h3>Results</h3>
+<div class="grid">
+  <figure>
+    <img src="output/cathedral.jpg" alt="">
+    <figcaption>cathedral — G (5, 2) · R (12, 3)</figcaption>
+  </figure>
+  <figure>
+    <img src="output/monastery.jpg" alt="">
+    <figcaption>monastery — G (-3, 2) · R (3, 2)</figcaption>
+  </figure>
+  <figure>
+    <img src="output/tobolsk.jpg" alt="">
+    <figcaption>tobolsk — G (3, 3) · R (6, 3)</figcaption>
+  </figure>
+</div>
+<p>
+  All three low-resolution plates align cleanly, and L2 and NCC agree on the
+  displacement for each of them. Each takes well under a second.
+</p>
+
+<h2>Part 2: Multi-scale pyramid alignment</h2>
+<h3>Why the single-scale search is not enough</h3>
+<p>
+  The full-size <code>.tif</code> plates are roughly ten times larger in each
+  dimension, so the displacements are roughly ten times larger too, up to
+  about 180 pixels in the results below. Widening the search window to cover
+  that range is quadratic: a radius of 180 means over 130,000 candidate
+  positions, each scored on a full-resolution image. That is far too slow.
+</p>
+
+<h3>Approach</h3>
+<p>
+  Instead the image is repeatedly halved and the search is done on the
+  smallest version, where a displacement of 180 pixels has shrunk to around
+  11 and the [-15, 15] window covers it comfortably. The estimate found there
+  is then carried back up.
+</p>
+<p>
+  Concretely, <code>align_pyramid</code> recurses: it downsamples both
+  channels and calls itself with one level fewer, stopping either when the level
+  budget runs out or when the channel is under 400 pixels tall. On these plates
+  the size threshold is always the binding one: a channel of 3250 rows is halved
+  four times, to 1625, 812, 406 and finally 203, so the budget of five is never
+  exhausted.
+</p>
+<p>
+  On the way back up, each returned estimate is doubled to account for the
+  change in scale, the moving channel is shifted by that amount, and only a
+  small correction of ±3 pixels is searched for at the current resolution.
+  The total displacement is the doubled estimate plus that correction. The
+  expensive full-radius search therefore happens exactly once, on the smallest
+  image; every level above it costs 49 comparisons.
+</p>
+<p>
+  Downsampling applies a Gaussian blur before discarding every second row and
+  column. Without that low-pass step, high frequencies in the original alias
+  into the smaller image, and the coarse levels then report displacements that
+  do not correspond to the real shift, an error which is subsequently doubled
+  at every level on the way back up.
+</p>
+
+<h3>Results on the provided plates</h3>
+<table>
+  <tr><th>Image</th><th>Green (dy, dx)</th><th>Red (dy, dx)</th><th>Time</th></tr>
+  <tr><td>cathedral.jpg</td><td>(5, 2)</td><td>(12, 3)</td><td>0.7s</td></tr>
+  <tr><td>church.tif</td><td>(25, 4)</td><td>(64, 267)</td><td>13.0s</td></tr>
+  <tr><td>emir.tif</td><td>(49, 24)</td><td>(103, 57)</td><td>10.3s</td></tr>
+  <tr><td>harvesters.tif</td><td>(59, 16)</td><td>(124, 13)</td><td>10.1s</td></tr>
+  <tr><td>icon.tif</td><td>(41, 17)</td><td>(90, 23)</td><td>10.7s</td></tr>
+  <tr><td>ilemselga.tif</td><td>(39, 7)</td><td>(130, 11)</td><td>10.1s</td></tr>
+  <tr><td>melons.tif</td><td>(82, 11)</td><td>(178, 13)</td><td>10.1s</td></tr>
+  <tr><td>monastery.jpg</td><td>(-3, 2)</td><td>(3, 2)</td><td>0.8s</td></tr>
+  <tr><td>religous_painting.tif</td><td>(28, 3)</td><td>(68, 7)</td><td>9.6s</td></tr>
+  <tr><td>self_portrait.tif</td><td>(79, 29)</td><td>(176, 37)</td><td>10.0s</td></tr>
+  <tr><td>siren.tif</td><td>(49, -6)</td><td>(96, -25)</td><td>10.0s</td></tr>
+  <tr><td>three_generations.tif</td><td>(53, 14)</td><td>(112, 11)</td><td>10.8s</td></tr>
+  <tr><td>tobolsk.jpg</td><td>(3, 3)</td><td>(6, 3)</td><td>1.4s</td></tr>
+  <tr><td>wharf.tif</td><td>(15, -7)</td><td>(83, -16)</td><td>10.3s</td></tr>
+</table>
+<p class="caption-note">Metric: L2 on raw pixel values, 5 pyramid levels, 10% crop. The images below are from the final
+  configuration described in the Bells &amp; Whistles section; the offsets differ by at most a pixel except on church.</p>
+
+<div class="grid">
+  <figure>
+    <img src="output/harvesters.jpg" alt="">
+    <figcaption>harvesters</figcaption>
+  </figure>
+  <figure>
+    <img src="output/melons.jpg" alt="">
+    <figcaption>melons</figcaption>
+  </figure>
+  <figure>
+    <img src="output/self_portrait.jpg" alt="">
+    <figcaption>self_portrait</figcaption>
+  </figure>
+</div>
+
+<div class="grid">
+  <figure>
+    <img src="output/icon.jpg" alt="">
+    <figcaption>icon</figcaption>
+  </figure>
+  <figure>
+    <img src="output/three_generations.jpg" alt="">
+    <figcaption>three_generations</figcaption>
+  </figure>
+  <figure>
+    <img src="output/wharf.jpg" alt="">
+    <figcaption>wharf</figcaption>
+  </figure>
+</div>
+
+<div class="grid">
+  <figure>
+    <img src="output/ilemselga.jpg" alt="">
+    <figcaption>ilemselga</figcaption>
+  </figure>
+  <figure>
+    <img src="output/religous_painting.jpg" alt="">
+    <figcaption>religous_painting</figcaption>
+  </figure>
+  <figure>
+    <img src="output/siren.jpg" alt="">
+    <figcaption>siren</figcaption>
+  </figure>
+</div>
+
+<h3>Failure case: church</h3>
+<p>
+  One plate fails with L2 on raw pixels. The red channel of
+  <code>church.tif</code> comes back at a horizontal displacement of 267
+  pixels, an order of magnitude larger than anything else in the set, and the
+  result shows heavy red ghosting along the church walls and roofs.
+</p>
+<div class="grid">
+  <figure>
+    <img src="output/church_l2.jpg" alt="">
+    <figcaption>L2 on raw pixels — R (64, 267)</figcaption>
+  </figure>
+  <figure>
+    <img src="output/church.jpg" alt="">
+    <figcaption>L2 on gradients — R (58, -4)</figcaption>
+  </figure>
+</div>
+<p>
+  The plate is dominated by a large expanse of water and sky with very little
+  structure. Over most of the image there is simply nothing for a pixelwise
+  distance to lock onto, so a spurious minimum on one of the coarse pyramid
+  levels scores better than the correct one. Because every estimate is doubled
+  on the way up, an error of a handful of pixels at the bottom of the pyramid
+  becomes a few hundred at the top, and a correction window of ±3 cannot
+  recover from it.
+</p>
+
+<h3>Swapping the metric</h3>
+<p>
+  Running the same pyramid with NCC instead of L2 fixes church, whose red comes
+  back at (58, -4), but breaks <code>emir.tif</code>, which lands at
+  (141, -205). The two metrics fail on different plates, so each configuration
+  has exactly one defective image out of fourteen. NCC is also roughly three
+  times slower, at 20–30 seconds per plate against 8–12 for L2.
+</p>
+
+<h2>Part 3: Images from the collection</h2>
+<p>
+  Three further plates were taken from the Library of Congress collection, in
+  each case the full-resolution <code>.tif</code> scan rather than the
+  restored color version, and run through the same pipeline with the same
+  parameters as everything above.
+</p>
+
+<table>
+  <tr><th>Image</th><th>Green (dy, dx)</th><th>Red (dy, dx)</th><th>Time</th></tr>
+  <tr><td>camel.tif</td><td>(22, 15)</td><td>(81, 38)</td><td>12.2s</td></tr>
+  <tr><td>jesus.tif</td><td>(39, 10)</td><td>(89, 7)</td><td>10.7s</td></tr>
+  <tr><td>train.tif</td><td>(41, 2)</td><td>(85, 29)</td><td>10.8s</td></tr>
+</table>
+<p class="caption-note">Metric: L2 on gradient magnitudes, 5 pyramid levels, 10% crop.</p>
+
+<div class="grid">
+  <figure>
+    <img src="own_results/camel.jpg" alt="">
+    <figcaption>Man with camel loaded with packs</figcaption>
+  </figure>
+  <figure>
+    <img src="own_results/jesus.jpg" alt="">
+    <figcaption>Bust of Jesus, Tver museum</figcaption>
+  </figure>
+  <figure>
+    <img src="own_results/train.jpg" alt="">
+    <figcaption>Parovoz "Kompaund" s paroperegrievatelem Shmidta</figcaption>
+  </figure>
+</div>
+
+<p>
+  The bust is the plate with the least color information of the three: white
+  plaster against a dark niche against a light wall, so all the structure is in
+  brightness rather than in hue. It aligns without trouble, which is not
+  surprising. The silhouette of the bust against the niche is a strong edge
+  that shows up in all three channels regardless of how much light each filter
+  let through, and the carved curls of the hair give the search plenty of
+  fine detail to settle on.
+</p>
+<p>
+  The camel plate shows the limit of the translation model rather than a
+  failure of the search. The man, the sacks and the tethering ropes are sharp,
+  but there is red and green fringing around the camel's muzzle and ears. The
+  animal moved between the three exposures, and no single shift of the whole
+  channel can undo a subject that was in a different place each time the
+  shutter opened. Correcting it would require a model that allows different
+  parts of the image to move independently.
+</p>
+
+<h2>Bells &amp; Whistles: Aligning on gradients</h2>
+<h3>Motivation</h3>
+<p>
+  Neither metric handles the whole set on its own: L2 loses church, NCC loses
+  emir. Both failures have the same root. The three channels are exposures
+  through different filters, so a given surface does not have the same
+  brightness in all three, and a metric comparing raw intensities is comparing
+  two pictures that genuinely do not look alike. <code>emir.tif</code> is the textbook
+  case: the robe is bright in one channel and dark in another.
+</p>
+<p>
+  Edges do not have that problem. Wherever the robe meets the wall there is a
+  discontinuity in all three channels, whatever the absolute levels on either
+  side happen to be. So instead of comparing intensities, the alignment
+  compares gradient magnitudes: a Sobel derivative in x and one in y, combined
+  as the length of the gradient vector. The search itself is unchanged, and
+  the displacement it finds is applied to the original channels. Only what
+  gets scored is different.
+</p>
+
+<h3>Before and after</h3>
+<div class="grid">
+  <figure>
+    <img src="output/emir_ncc.jpg" alt="">
+    <figcaption>NCC on raw pixels — R (141, -205)</figcaption>
+  </figure>
+  <figure>
+    <img src="output/emir.jpg" alt="">
+    <figcaption>L2 on gradients — R (107, 40)</figcaption>
+  </figure>
+</div>
+
+<h3>Results</h3>
+<table>
+  <tr><th>Image</th><th>Green (dy, dx)</th><th>Red (dy, dx)</th><th>Time</th></tr>
+  <tr><td>cathedral.jpg</td><td>(5, 2)</td><td>(12, 3)</td><td>0.7s</td></tr>
+  <tr><td>church.tif</td><td>(25, 4)</td><td>(58, -4)</td><td>9.0s</td></tr>
+  <tr><td>emir.tif</td><td>(49, 24)</td><td>(107, 40)</td><td>9.5s</td></tr>
+  <tr><td>harvesters.tif</td><td>(60, 17)</td><td>(124, 14)</td><td>9.0s</td></tr>
+  <tr><td>icon.tif</td><td>(42, 17)</td><td>(90, 23)</td><td>9.5s</td></tr>
+  <tr><td>ilemselga.tif</td><td>(40, 7)</td><td>(131, 11)</td><td>9.7s</td></tr>
+  <tr><td>melons.tif</td><td>(80, 10)</td><td>(177, 13)</td><td>9.6s</td></tr>
+  <tr><td>monastery.jpg</td><td>(-3, 2)</td><td>(3, 2)</td><td>0.8s</td></tr>
+  <tr><td>religous_painting.tif</td><td>(30, 7)</td><td>(70, 6)</td><td>9.8s</td></tr>
+  <tr><td>self_portrait.tif</td><td>(78, 29)</td><td>(176, 37)</td><td>13.7s</td></tr>
+  <tr><td>siren.tif</td><td>(49, -6)</td><td>(96, -24)</td><td>10.3s</td></tr>
+  <tr><td>three_generations.tif</td><td>(54, 12)</td><td>(111, 9)</td><td>9.6s</td></tr>
+  <tr><td>tobolsk.jpg</td><td>(3, 3)</td><td>(6, 3)</td><td>0.8s</td></tr>
+  <tr><td>wharf.tif</td><td>(15, -7)</td><td>(83, -16)</td><td>10.0s</td></tr>
+</table>
+<p class="caption-note">Metric: L2 on gradient magnitudes, 5 pyramid levels, 10% crop.</p>
+
+<p>
+  Aligning on gradients fixes both problem plates at once, and no image in the
+  set is left with a visible defect. The more interesting result is that L2
+  and NCC now return <em>identical</em> displacements on all fourteen provided plates.
+  Once the comparison is made on edges rather than intensities, the property
+  that distinguishes NCC, its indifference to brightness and contrast
+  differences between the channels, no longer buys anything, because the
+  gradient magnitude has already discarded the absolute levels. The choice of
+  metric stops mattering, so L2 is the better pick: same answer, about a third
+  of the running time.
+</p>
+
+<h2>Implementation notes</h2>
+<p>
+  All images are converted to float in [0, 1] on load, with the scale factor
+  taken from the file's dtype rather than from its contents: the JPEGs are
+  8-bit and the TIFFs 16-bit, and normalizing by the maximum present in each
+  image would put them on different scales. One fixed parameter set is used
+  for every plate: a search radius of 15, five pyramid levels, a correction
+  radius of 3 and a 10% crop. The five-level budget is therefore an upper bound
+  rather than the number of halvings that actually happen. Four is what the size
+  threshold allows on the full-resolution scans.
+</p>
+
+<a class="back" href="../">All projects overview</a>
+
+</body>
+</html>
