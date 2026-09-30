@@ -1,0 +1,15 @@
+Image Name: own_images\camel.tif
+Green Offset (dy, dx): (22, 15)
+Red Offset (dy, dx): (81, 38)
+Elapsed Time: 12.19s
+
+Image Name: own_images\jesus.tif
+Green Offset (dy, dx): (39, 10)
+Red Offset (dy, dx): (89, 7)
+Elapsed Time: 10.66s
+
+Image Name: own_images\train.tif
+Green Offset (dy, dx): (41, 2)
+Red Offset (dy, dx): (85, 29)
+Elapsed Time: 10.77s
+
