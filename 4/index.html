@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <title>Project 4A — CS 180</title>
+    <link rel="stylesheet" href="../style.css">
+    <meta charset="utf-8">
+</head>
+<body>
+<header>
+    <p class="eyebrow">Project 04 · Part A</p>
+    <h1>Image Warping and Mosaicing</h1>
+</header>
+
+<h2>Overview</h2>
+<p>
+    This part of the project is about projective warping. From a few clicked
+    point correspondences I compute a homography between two images, use it to
+    warp one image into the other's perspective with inverse warping, and
+    apply this to two tasks: rectifying planar objects that were photographed
+    at an angle, and stitching several photos into a mosaic. Everything except
+    basic linear algebra (least squares, matrix inverse) and a distance
+    transform for blending is implemented by hand with NumPy.
+</p>
+
+<h2>A.1: Shooting the pictures</h2>
+<p>
+    For each mosaic I took three photos from one spot and only rotated the
+    phone between them, with about 40–70% overlap and the main (1×) lens. A
+    fixed center of projection is what makes the transformation between the
+    photos a homography. All images were downscaled to about 1200 px on the
+    long side before clicking correspondences.
+</p>
+
+<h3>Set 1: Glass facade (horizontal pan)</h3>
+<div class="compare">
+    <figure>
+        <img src="input%20images/resized/mosaics/mosaic_1_a.jpg" alt="">
+        <figcaption>a (left)</figcaption>
+    </figure>
+    <figure>
+        <img src="input%20images/resized/mosaics/mosaic_1_b.jpg" alt="">
+        <figcaption>b (center, reference)</figcaption>
+    </figure>
+    <figure>
+        <img src="input%20images/resized/mosaics/mosaic_1_c.jpg" alt="">
+        <figcaption>c (right)</figcaption>
+    </figure>
+</div>
+
+<h3>Set 2: Campanile (vertical pan)</h3>
+<div class="compare">
+    <figure>
+        <img src="input%20images/resized/mosaics/mosaic_2_a.jpg" alt="">
+        <figcaption>a (bottom)</figcaption>
+    </figure>
+    <figure>
+        <img src="input%20images/resized/mosaics/mosaic_2_b.jpg" alt="">
+        <figcaption>b (middle, reference)</figcaption>
+    </figure>
+    <figure>
+        <img src="input%20images/resized/mosaics/mosaic_2_c.jpg" alt="">
+        <figcaption>c (top)</figcaption>
+    </figure>
+</div>
+
+<h3>Set 3: Library bookshelf (horizontal pan)</h3>
+<div class="compare">
+    <figure>
+        <img src="input%20images/resized/mosaics/mosaic_3_a.jpg" alt="">
+        <figcaption>a</figcaption>
+    </figure>
+    <figure>
+        <img src="input%20images/resized/mosaics/mosaic_3_b.jpg" alt="">
+        <figcaption>b (reference)</figcaption>
+    </figure>
+    <figure>
+        <img src="input%20images/resized/mosaics/mosaic_3_c.jpg" alt="">
+        <figcaption>c</figcaption>
+    </figure>
+</div>
+
+<h2>A.2: Recovering homographies</h2>
+<p>
+    A homography maps a point <code>(x, y)</code> to <code>(x', y')</code> via
+    <code>p' = H p</code> in homogeneous coordinates. With the bottom-right
+    entry fixed to 1, H has eight unknowns a–h:
+</p>
+<pre><code>    | a  b  c |        x' = (a·x + b·y + c) / (g·x + h·y + 1)
+H = | d  e  f |        y' = (d·x + e·y + f) / (g·x + h·y + 1)
+    | g  h  1 |</code></pre>
+<p>
+    Multiplying both equations by the denominator makes them linear in the
+    unknowns. Every correspondence therefore gives two rows of a linear system
+    <code>A h = b</code>:
+</p>
+<pre><code>[x, y, 1, 0, 0, 0, −x·x', −y·x'] · h = x'
+[0, 0, 0, x, y, 1, −x·y', −y·y'] · h = y'</code></pre>
+<p>
+    With n points, A is 2n × 8. Four points determine H exactly; for the
+    mosaics I clicked about ten points per pair, so the system is
+    overdetermined and solved with least squares, which averages out small
+    clicking errors.
+</p>
+<pre><code>def computeH(im1_pts, im2_pts):
+    A, b = [], []
+    for (x, y), (xp, yp) in zip(im1_pts, im2_pts):
+        A.append([x, y, 1, 0, 0, 0, -x * xp, -y * xp])
+        A.append([0, 0, 0, x, y, 1, -x * yp, -y * yp])
+        b.append(xp)
+        b.append(yp)
+    h = np.linalg.lstsq(np.asarray(A), np.asarray(b), rcond=None)[0]
+    return np.append(h, 1).reshape(3, 3)</code></pre>
+
+<h3>Correspondences</h3>
+<p>
+    Points were clicked with matplotlib's <code>ginput</code>, numbered in the
+    same order in both images and stored as JSON.
+</p>
+<figure>
+    <img src="output%20images/mosaic_1_a_b_points.png" alt="">
+    <figcaption>facade, a ↔ b</figcaption>
+</figure>
+<figure>
+    <img src="output%20images/mosaic_1_b_c_points.png" alt="">
+    <figcaption>facade, b ↔ c</figcaption>
+</figure>
+<figure>
+    <img src="output%20images/mosaic_2_a_b_points.png" alt="">
+    <figcaption>Campanile, a ↔ b</figcaption>
+</figure>
+<figure>
+    <img src="output%20images/mosaic_2_b_c_points.png" alt="">
+    <figcaption>Campanile, b ↔ c</figcaption>
+</figure>
+<figure>
+    <img src="output%20images/mosaic_3_a_b_points.png" alt="">
+    <figcaption>bookshelf, a ↔ b</figcaption>
+</figure>
+<figure>
+    <img src="output%20images/mosaic_3_b_c_points.png" alt="">
+    <figcaption>bookshelf, b ↔ c</figcaption>
+</figure>
+
+<h3>Recovered homography</h3>
+<p>Example: facade, image a → image b.</p>
+<pre><code>H_ab =
+[[ 4.2393000e+00 -3.2870000e-01 -2.9655592e+03]
+ [ 1.4850000e+00  3.3775000e+00 -1.4267596e+03]
+ [ 2.7000000e-03 -2.0000000e-04  1.0000000e+00]]</code></pre>
+<p>
+    To check each homography, I mapped the clicked points of one image through
+    H and measured the distance to their partners in the other image. For the
+    final point sets this reprojection error is a few pixels per point (for
+    example 1.8–5.5 px for facade a → b and below 4 px for both bookshelf
+    pairs).
+</p>
+<p>
+    This check was essential. My first attempts at the facade and the
+    Campanile produced wildly distorted mosaics, and the reasons were
+    different. For the facade, several windows were miscounted, which showed
+    up as errors of up to 116 px. For the Campanile, the error was small, but
+    all points lay on the narrow tower, almost on one vertical line. H then
+    fits perfectly along that line but is undetermined sideways, so the image
+    tilted away. Re-clicking with points spread over the whole overlap,
+    including branch tips left and right of the tower, fixed both.
+</p>
+
+<h2>A.3: Warping the images</h2>
+<p>
+    Warping uses inverse mapping so that every output pixel gets exactly one
+    value and there are no holes:
+</p>
+<ol>
+    <li>Choose the output region (bounding box) in the target coordinates.</li>
+    <li>Build a grid of all output pixel coordinates with <code>np.meshgrid</code>
+        and stack them as homogeneous points (3 × N).</li>
+    <li>Multiply with <code>H⁻¹</code> and divide by the third coordinate to get
+        the source position of every output pixel.</li>
+    <li>Sample the source image at these (generally non-integer) positions.</li>
+</ol>
+<p>
+    The whole computation is vectorized with NumPy, without loops over pixels.
+    The output has a fourth alpha channel that is 1 where the source position
+    lies inside the original image and 0 elsewhere, so areas without data are
+    transparent.
+</p>
+<pre><code>def inverse_map(H, box):
+    x_min, x_max, y_min, y_max = box
+    X, Y = np.meshgrid(np.arange(x_min, x_max + 1), np.arange(y_min, y_max + 1))
+    stack = np.stack([X.ravel(), Y.ravel(), np.ones(X.size)])
+    src = np.linalg.inv(H) @ stack
+    src_x = (src[0] / src[2]).reshape(X.shape)
+    src_y = (src[1] / src[2]).reshape(X.shape)
+    return src_x, src_y</code></pre>
+<p>
+    By default the bounding box comes from sending the four image corners
+    through H. For the rectifications this fails: the TV was photographed so
+    obliquely that the vanishing point of its top and bottom edges lies inside
+    the photo. Everything beyond that line has no valid position on the TV
+    plane (the homogeneous coordinate w changes sign), and those corners land
+    at absurd coordinates. For rectification I therefore use a fixed output
+    box around the target rectangle with 200 px margin.
+</p>
+
+<h3>Nearest neighbor and bilinear interpolation</h3>
+<p>
+    <b>Nearest neighbor</b> rounds the source position to the closest pixel.
+    <b>Bilinear</b> takes the four surrounding pixels and blends them, weighted
+    by the fractional distances dx and dy:
+</p>
+<pre><code>value = (1−dx)(1−dy)·I[y0, x0] + dx(1−dy)·I[y0, x1]
+      + (1−dx)dy·I[y1, x0]     + dx·dy·I[y1, x1]</code></pre>
+<p>
+    I use the convention that integer coordinates are pixel centers, which is
+    also how matplotlib displays images and reports clicked points.
+</p>
+
+<h3>Rectification</h3>
+<p>
+    For rectification there is only one image. I clicked the four corners of a
+    rectangular object and mapped them to a rectangle with the object's real
+    aspect ratio: 16:9 (1280 × 720) for the TV screen, and about 25 × 12 cm
+    (1250 × 600) for the laptop keyboard, measured roughly.
+</p>
+
+<h3>TV</h3>
+<figure class="small">
+    <img src="output%20images/rectification_2_points.png" alt="">
+    <figcaption>input with the four clicked corners</figcaption>
+</figure>
+<div class="compare">
+    <figure>
+        <img src="output%20images/rectification_2_nn.png" alt="">
+        <figcaption>nearest neighbor</figcaption>
+    </figure>
+    <figure>
+        <img src="output%20images/rectification_2_bilinear.png" alt="">
+        <figcaption>bilinear</figcaption>
+    </figure>
+</div>
+
+<h3>Laptop keyboard</h3>
+<figure class="small">
+    <img src="output%20images/rectification_1_points.png" alt="">
+    <figcaption>input with the four clicked corners</figcaption>
+</figure>
+<div class="compare">
+    <figure>
+        <img src="output%20images/rectification_1_nn.png" alt="">
+        <figcaption>nearest neighbor</figcaption>
+    </figure>
+    <figure>
+        <img src="output%20images/rectification_1_bilinear.png" alt="">
+        <figcaption>bilinear</figcaption>
+    </figure>
+</div>
+<p>
+    Both objects come out as straight, frontal rectangles. In the photo, the
+    keyboard was rotated by 90°, so the corners were assigned such that the
+    function key row ends up on top. The letter keys come out roughly square,
+    which confirms the estimated aspect ratio. The side of each object that
+    was farthest from the camera is visibly blurrier, because it was covered
+    by far fewer pixels in the original photo and had to be stretched.
+</p>
+
+<h3>Speed vs. quality</h3>
+<table>
+    <tr><th>Method</th><th>Time (TV, 1681 × 1121 output)</th></tr>
+    <tr><td>Nearest neighbor</td><td>0.24 s</td></tr>
+    <tr><td>Bilinear</td><td>0.94 s</td></tr>
+</table>
+<p>
+    Bilinear interpolation is about four times slower, since it reads four
+    source pixels instead of one and computes the weights. In return, it
+    gives smoother results: nearest neighbor produces jagged, staircase-like
+    edges, which are most visible on text and diagonal lines such as the
+    lettering on the TV screen and the key labels. Bilinear looks slightly
+    softer but has no such artifacts. For the mosaics I use bilinear.
+</p>
+
+<h2>A.4: Blending the images into a mosaic</h2>
+<p>The procedure for each mosaic:</p>
+<ol>
+    <li>The middle image b is the reference. I compute <code>H_ab</code> (a → b)
+        and <code>H_cb</code> (c → b; the b ↔ c points are passed in swapped
+        order). Image b itself uses the identity matrix, so the same warp
+        function works for all three images.</li>
+    <li>The bounding boxes of all three warped images are combined into one
+        common output box.</li>
+    <li>All three images are warped with bilinear interpolation into this same
+        box, so they are stacked on top of each other with identical size.</li>
+    <li>The stack is blended into one image.</li>
+</ol>
+<p>
+    The simplest blending is an average of all images that have alpha = 1 at
+    a pixel. This produces visible edges wherever an image starts or ends.
+    For feathering, each image instead gets a weight equal to the distance of
+    each pixel to the border of that image
+    (<code>scipy.ndimage.distance_transform_edt</code> of its alpha channel).
+    Every image fades out smoothly towards its edges, and the result is the
+    weighted average:
+</p>
+<pre><code>weight_a = distance_transform_edt(warped_a[..., 3])[..., None]
+...
+result = (rgb_a * weight_a + rgb_b * weight_b + rgb_c * weight_c) \
+         / (weight_a + weight_b + weight_c)</code></pre>
+
+<div class="compare">
+    <figure>
+        <img src="output%20images/mosaic_1_simple.png" alt="">
+        <figcaption>simple average</figcaption>
+    </figure>
+    <figure>
+        <img src="output%20images/mosaic_1_feathering.png" alt="">
+        <figcaption>feathering</figcaption>
+    </figure>
+</div>
+<p>
+    With the simple average, the outline of the reference image is clearly
+    visible as a brighter rectangle in the middle. Feathering removes these
+    hard edges.
+</p>
+
+<h3>Mosaic 1: Glass facade</h3>
+<figure>
+    <img src="output%20images/mosaic_1_feathering.png" alt="">
+</figure>
+<p>
+    The facade lines up across all three images. The curb and railing in the
+    foreground show slight double edges. Since the phone was rotated by hand,
+    the camera did not turn exactly around its optical center, and objects
+    close to the camera show parallax. A single homography can only align one
+    plane exactly, and since most correspondences lie on the facade, the
+    facade is aligned and the curb is not quite.
+</p>
+
+<h3>Mosaic 2: Campanile</h3>
+<figure class="small">
+    <img src="output%20images/mosaic_2_feathering.png" alt="">
+</figure>
+<p>
+    The vertical mosaic shows the whole tower from the brick pavement to the
+    belfry, which does not fit into any single photo from this distance. The
+    reference is the middle image, so the bottom and top images are stretched
+    towards the edges, most visibly in the pavement at the bottom.
+</p>
+
+<h3>Mosaic 3: Library bookshelf</h3>
+<figure>
+    <img src="output%20images/mosaic_3_feathering.png" alt="">
+</figure>
+<p>
+    The bookshelf was the easiest set to register, because almost every
+    spine is unique and has sharp corners on labels and titles. The shelf
+    boards run straight across all three images. Correspondences were only
+    placed on the front plane (spines, labels, shelf edges), not on the
+    shelves visible further back through the gaps.
+</p>
+
+<h2>What I learned</h2>
+<p>
+    The math of a homography is short, but the result depends almost entirely
+    on the correspondences. Points that are wrong by one window, or points
+    that are accurate but all lie on one line, both break the mosaic, and only
+    the second case is invisible in the reprojection error. Spreading the
+    points over the whole overlap mattered more than clicking more of them.
+    I also learned where a homography stops being meaningful: beyond the
+    vanishing line of a plane, points have no valid image, which is why the
+    bounding box from the image corners failed for the strongly tilted TV.
+</p>
+
+<a class="back" href="../">All projects overview</a>
+
+</body>
+</html>
