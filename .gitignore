@@ -1,3 +1,26 @@
 /1/output/offsets.txt
 /1/submission.zip
 /2/submission.zip
+
+.venv/
+**/.idea/
+**/__pycache__/
+
+1/README.md
+1/images/
+1/main.py
+1/own_images/
+1/.idea/1.iml
+
+2/README.md
+2/align_image_code.py
+2/main.py
+
+3/Part_A.ipynb
+3/Part_B.ipynb
+3/*.pdf
+
+4/click.py
+4/input images/original/
+4/output images/homographies.txt
+4/part_a.py
