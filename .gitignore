@@ -24,3 +24,5 @@
 4/input images/original/
 4/output images/homographies.txt
 4/part_a.py
+4/part_b.py
+4/harris.py

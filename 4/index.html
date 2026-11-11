@@ -1,15 +1,17 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <title>Project 4A — CS 180</title>
+    <title>Project 4 — CS 180</title>
     <link rel="stylesheet" href="../style.css">
     <meta charset="utf-8">
 </head>
 <body>
 <header>
-    <p class="eyebrow">Project 04 · Part A</p>
-    <h1>Image Warping and Mosaicing</h1>
+    <p class="eyebrow">Project 04 · Part A &amp; B</p>
+    <h1>Image Warping, Mosaicing and Autostitching</h1>
 </header>
+
+<h1>Part A: Image Warping and Mosaicing</h1>
 
 <h2>Overview</h2>
 <p>
@@ -357,7 +359,7 @@ result = (rgb_a * weight_a + rgb_b * weight_b + rgb_c * weight_c) \
     shelves visible further back through the gaps.
 </p>
 
-<h2>What I learned</h2>
+<h2>What I learned (Part A)</h2>
 <p>
     The math of a homography is short, but the result depends almost entirely
     on the correspondences. Points that are wrong by one window, or points
@@ -367,6 +369,298 @@ result = (rgb_a * weight_a + rgb_b * weight_b + rgb_c * weight_c) \
     I also learned where a homography stops being meaningful: beyond the
     vanishing line of a plane, points have no valid image, which is why the
     bounding box from the image corners failed for the strongly tilted TV.
+</p>
+
+
+<h1>Part B: Feature Matching for Autostitching</h1>
+
+<h2>Overview</h2>
+<p>
+    In Part A every correspondence was clicked by hand. In Part B the whole
+    pipeline runs automatically, following the paper "Multi-Image Matching
+    using Multi-Scale Oriented Patches" by Brown, Szeliski and Winder (in a
+    simplified single-scale version). For each image pair I detect corners,
+    pick a well-distributed subset, describe each corner with a small
+    normalized patch, match the patches between the two images, and finally
+    estimate the homography robustly with RANSAC. The warping and blending
+    code is the same as in Part A. The examples in B.1 to B.3 use the
+    bookshelf set (mosaic 3), images a and b.
+</p>
+
+<h2>B.1: Harris corner detection</h2>
+<p>
+    Corners are detected with the single-scale Harris detector from the
+    provided <code>harris.py</code> on the grayscale image. Each pixel gets a
+    corner strength <code>h</code>, and local maxima are kept as interest
+    points. I additionally discard all corners closer than 20 px to the image
+    border, because the 40 × 40 descriptor window in B.2 would otherwise
+    reach outside the image.
+</p>
+<p>
+    Harris returns thousands of corners, and most of them sit in highly
+    textured regions. To get a smaller set that is still spread over the whole
+    image, I use <b>Adaptive Non-Maximal Suppression (ANMS)</b>. For every
+    corner <code>i</code> I compute its suppression radius: the distance to the
+    nearest corner that is clearly stronger,
+</p>
+<pre><code>r_i = min_j ‖x_i − x_j‖   over all j with  f(x_i) &lt; c_robust · f(x_j),   c_robust = 0.9</code></pre>
+<p>
+    and keep the 500 corners with the largest radius. A strong corner far
+    away from other strong corners gets a large radius, so the selected
+    points are both strong and evenly distributed. The computation is fully
+    vectorized: one pairwise distance matrix, masked with the strength
+    condition, then a minimum per row.
+</p>
+<pre><code>def anms(h, corners, n=500, c_robust=0.9):
+    f = h[corners[0], corners[1]]
+    M = len(f)
+    d = har.dist2(corners.T, corners.T)
+    cond = f.reshape(M, 1) &lt; c_robust * f.reshape(1, M)
+    d = np.where(cond, d, np.inf)
+    r = d.min(axis=1)
+    return corners[:, np.argsort(-r)[:n]]</code></pre>
+<div class="compare">
+    <figure>
+        <img src="output%20images/part_b/harris_corners.png" alt="">
+        <figcaption>all Harris corners</figcaption>
+    </figure>
+    <figure>
+        <img src="output%20images/part_b/anms_corners.png" alt="">
+        <figcaption>500 corners after ANMS</figcaption>
+    </figure>
+</div>
+<p>
+    Harris returns several thousand corners that cover almost the entire
+    image, including weakly textured areas like the floor and the ceiling,
+    so the plot on the left is nearly solid blue. After ANMS, 500 corners
+    remain and they are spread evenly over the whole image: on the book
+    spines and labels, along the shelf edges, but also on the floor, wall
+    and ceiling. Some of the points in low-texture regions will not be
+    distinctive enough to match, but the ratio test in B.3 filters most of
+    them out.
+</p>
+
+<h2>B.2: Feature descriptor extraction</h2>
+<p>
+    For each selected corner I extract an axis-aligned 8 × 8 descriptor:
+</p>
+<ol>
+    <li>Blur the grayscale image with a Gaussian (σ = 2), so that the
+        subsampling in the next step does not alias.</li>
+    <li>Take the 40 × 40 window around the corner and sample every 5th pixel,
+        which gives 8 × 8 values.</li>
+    <li>Bias/gain normalization: subtract the mean and divide by the standard
+        deviation of the patch. This makes the descriptor invariant to
+        brightness and contrast changes between the photos.</li>
+</ol>
+<pre><code>blurred = gaussian_filter(image_bw, 2)
+patch = blurred[r - 20:r + 20:5, c - 20:c + 20:5]
+patch = (patch - patch.mean()) / (patch.std() + 1e-8)</code></pre>
+<p>
+    Rotation invariance and the wavelet transform from the paper are not
+    needed here, since the photos of one mosaic were taken with the same
+    camera orientation.
+</p>
+<figure>
+    <img src="output%20images/part_b/patches.png" alt="">
+    <figcaption>examples of normalized 8 × 8 descriptors</figcaption>
+</figure>
+
+<h2>B.3: Feature matching</h2>
+<p>
+    Each descriptor is flattened to a 64-dimensional vector. For every feature
+    in image a I compute the squared distance (SSD) to every feature in image b
+    and look at its nearest (1-NN) and second-nearest (2-NN) neighbor. A single
+    nearest-neighbor distance is a poor criterion, because repeated
+    structures (windows, book spines) produce many similar patches. Following
+    Lowe, I instead use the ratio of the two:
+</p>
+<pre><code>accept match  ⇔  e_1-NN / e_2-NN &lt; 0.65</code></pre>
+<p>
+    A correct match should be clearly better than the second-best candidate,
+    while for an incorrect match both candidates are about equally bad. Since
+    <code>dist2</code> returns squared distances, the threshold of 0.65
+    corresponds to a ratio of about 0.81 on plain Euclidean distances.
+</p>
+<figure>
+    <img src="output%20images/part_b/matches.png" alt="">
+    <figcaption>matched features, bookshelf a ↔ b (same color = same match)</figcaption>
+</figure>
+<p>
+    Of the 500 features in image a, 110 pass the ratio test. Most of them lie
+    on book spines, labels and shelf edges, where the patches are
+    distinctive. Some matches are clearly wrong, for example points on the
+    wall at the left edge of image a, a region that is not visible in image
+    b at all. RANSAC later keeps 58 of the 110 matches, so roughly half of
+    them were outliers. This is why the ratio test alone is not enough.
+</p>
+
+<h2>B.4: RANSAC for robust homography estimation</h2>
+<p>
+    Even after the ratio test, some matches are wrong. A least-squares
+    homography over all matches would be pulled away by these outliers, so I
+    use 4-point RANSAC, implemented from scratch:
+</p>
+<ol>
+    <li>Pick 4 random matches and compute the exact homography H from them
+        (<code>computeH</code> from Part A).</li>
+    <li>Map all points of the first image through H (homogeneous coordinates,
+        divide by w) and measure the distance to their matched points.</li>
+    <li>Matches with an error below ε = 3 px are inliers.</li>
+    <li>Repeat 20 000 times and keep the largest inlier set.</li>
+    <li>Recompute H with least squares on all inliers of the best set.</li>
+</ol>
+<pre><code>def ransac(pts1, pts2, n_iter=20000, eps=3):
+    best_count, best_mask = -np.inf, None
+    pts1_h = np.column_stack((pts1, np.ones(len(pts1))))
+    for _ in range(n_iter):
+        idx = np.random.choice(len(pts1), 4, replace=False)
+        H = computeH(pts1[idx], pts2[idx])
+        p = H @ pts1_h.T
+        proj = np.column_stack((p[0] / p[2], p[1] / p[2]))
+        inliers = np.linalg.norm(proj - pts2, axis=1) &lt; eps
+        if inliers.sum() &gt; best_count:
+            best_count, best_mask = inliers.sum(), inliers
+    return computeH(pts1[best_mask], pts2[best_mask]), best_mask</code></pre>
+<p>
+    The number of iterations matters more than I expected. RANSAC only finds
+    the right model if all 4 sampled matches are inliers, which happens with
+    probability w<sup>4</sup> for an inlier ratio w. To succeed with
+    probability p, it needs
+</p>
+<pre><code>N = log(1 − p) / log(1 − w⁴)</code></pre>
+<p>
+    iterations. My first version used 2000 iterations. For the bookshelf
+    pair c ↔ b, only 8 of 60 matches were found as inliers, and the mosaic
+    showed doubled, shifted shelves on the right. With w ≈ 0.13, a single
+    sample is all-inlier with probability of only about 3 · 10⁻⁴, so 2000
+    iterations hit a correct sample less than once on average; for p = 0.99
+    about 15 000 are needed. With 20 000 iterations, RANSAC found 13 inliers
+    and the mosaic was correct. Since each iteration is only a tiny 8 × 8
+    least-squares problem, this costs just a few seconds.
+</p>
+<p>
+    One detail: the corners are stored as (row, col), while
+    <code>computeH</code> expects (x, y) = (col, row), so the coordinates are
+    swapped before RANSAC.
+</p>
+<p>
+    The mosaics are built exactly as in Part A: b is the reference, a → b and
+    c → b are estimated independently (each with its own matching and
+    RANSAC), and all three images are warped into one common box and blended
+    with feathering.
+</p>
+
+<h3>RANSAC inliers</h3>
+<div class="compare">
+    <figure>
+        <img src="output%20images/part_b/mosaic_1_a_b_inliers.png" alt="">
+        <figcaption>facade, a ↔ b</figcaption>
+    </figure>
+    <figure>
+        <img src="output%20images/part_b/mosaic_1_c_b_inliers.png" alt="">
+        <figcaption>facade, c ↔ b</figcaption>
+    </figure>
+</div>
+<div class="compare">
+    <figure>
+        <img src="output%20images/part_b/mosaic_2_a_b_inliers.png" alt="">
+        <figcaption>Campanile, a ↔ b</figcaption>
+    </figure>
+    <figure>
+        <img src="output%20images/part_b/mosaic_2_c_b_inliers.png" alt="">
+        <figcaption>Campanile, c ↔ b</figcaption>
+    </figure>
+</div>
+<div class="compare">
+    <figure>
+        <img src="output%20images/part_b/mosaic_3_a_b_inliers.png" alt="">
+        <figcaption>bookshelf, a ↔ b</figcaption>
+    </figure>
+    <figure>
+        <img src="output%20images/part_b/mosaic_3_c_b_inliers.png" alt="">
+        <figcaption>bookshelf, c ↔ b</figcaption>
+    </figure>
+</div>
+<table>
+    <tr><th>Pair</th><th>Matches after ratio test</th><th>RANSAC inliers</th></tr>
+    <tr><td>facade a ↔ b</td><td>55</td><td>12 (22 %)</td></tr>
+    <tr><td>facade c ↔ b</td><td>82</td><td>39 (48 %)</td></tr>
+    <tr><td>Campanile a ↔ b</td><td>91</td><td>67 (74 %)</td></tr>
+    <tr><td>Campanile c ↔ b</td><td>145</td><td>113 (78 %)</td></tr>
+    <tr><td>bookshelf a ↔ b</td><td>110</td><td>58 (53 %)</td></tr>
+    <tr><td>bookshelf c ↔ b</td><td>60</td><td>13 (22 %)</td></tr>
+</table>
+
+<h3>Mosaic 1: Glass facade — manual vs. automatic</h3>
+<figure>
+    <img src="output%20images/part_b/mosaic_1_comparison.png" alt="">
+    <figcaption>left: manual correspondences (Part A), right: automatic</figcaption>
+</figure>
+<p>
+    The facade was the hardest set for automatic matching. Its regular grid
+    of identical glass panels and vertical fins produces many patches that
+    look almost the same, so the ratio test rejects most candidates and only
+    12 of 55 matches for a ↔ b survive RANSAC. Still, the facade continues
+    without visible breaks in the automatic mosaic. The outer shape differs
+    from the manual version: image a is stretched further to the left. Both
+    homographies agree in the overlap, but small differences in H grow
+    quickly towards the far edge of the warped image.
+</p>
+
+<h3>Mosaic 2: Campanile — manual vs. automatic</h3>
+<figure>
+    <img src="output%20images/part_b/mosaic_2_comparison.png" alt="">
+    <figcaption>left: manual correspondences (Part A), right: automatic</figcaption>
+</figure>
+<p>
+    The Campanile worked best: 67 and 113 inliers, by far the most of all
+    pairs. Tree branches, bricks and the stone of the planter give a lot of
+    distinctive texture. The automatic mosaic is practically identical to the
+    manual one. Unlike my first manual attempt, where all points lay on the
+    tower, the automatic features are spread over the whole overlap, so this
+    failure case cannot happen here.
+</p>
+
+<h3>Mosaic 3: Library bookshelf — manual vs. automatic</h3>
+<figure>
+    <img src="output%20images/part_b/mosaic_3_comparison.png" alt="">
+    <figcaption>left: manual correspondences (Part A), right: automatic</figcaption>
+</figure>
+<p>
+    For a ↔ b the bookshelf was easy (58 inliers), but c ↔ b was difficult:
+    image c is dominated by long rows of identical book sets, whose spines
+    are indistinguishable at 8 × 8 resolution. Only 60 matches pass the ratio
+    test and only 13 of them are inliers. With 2000 RANSAC iterations this
+    pair failed (see B.4); with 20 000 iterations the automatic mosaic is as
+    good as the manual one, and the shelf boards run straight across all
+    three images.
+</p>
+
+<h3>Automatic mosaics</h3>
+<figure>
+    <img src="output%20images/part_b/mosaic_1_auto_feathering.png" alt="">
+    <figcaption>glass facade</figcaption>
+</figure>
+<figure class="small">
+    <img src="output%20images/part_b/mosaic_2_auto_feathering.png" alt="">
+    <figcaption>Campanile</figcaption>
+</figure>
+<figure>
+    <img src="output%20images/part_b/mosaic_3_auto_feathering.png" alt="">
+    <figcaption>library bookshelf</figcaption>
+</figure>
+
+<h2>What I learned (Part B)</h2>
+<p>
+    Automatic matching does not need perfect features, it needs a robust
+    estimator. Half of the matches that pass the ratio test can be wrong, and
+    RANSAC still finds the right homography, but only if it runs long
+    enough: with a low inlier ratio, the required number of iterations grows
+    with w<sup>−4</sup>, and too few iterations failed silently. I also saw
+    that the scenes that are easiest to click by hand (regular facades,
+    rows of identical books) are the hardest for patch descriptors, because
+    repeated structures make the nearest neighbor ambiguous.
 </p>
 
 <a class="back" href="../">All projects overview</a>
